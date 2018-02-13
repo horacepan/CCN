@@ -1,5 +1,5 @@
 #from importlib import reload
-#import functions.contract18
+import functions.contract18
 #reload(functions.contract18)
 
 import pdb
@@ -13,9 +13,7 @@ import torch.optim as optim
 import random
 import time
 
-CUDA = False
-
-def graphGen(N, d, sat_rate=0.9, ones=True, Y_Variable=True):
+def graph_gen(N, d, sat_rate=0.9, ones=True, Y_Variable=True):
     '''
     N: number of nodes
     d: length of base feature vector
@@ -42,93 +40,115 @@ def graphGen(N, d, sat_rate=0.9, ones=True, Y_Variable=True):
     return X, b_symm, Y
 
 class compnetUtils():
-    def __init__(self, cudaFlag = True, cudaContract=True, num_contractions=18):
-        self.cudaFlag=cudaFlag
-        self.cudaContract = cudaContract
+    def __init__(self, cudaflag = True, cudacontract=True, num_contractions=18):
+        self.cudaflag=cudaflag
+        self.cudacontract = cudacontract
 
         def python_contract(T, adj):
             '''
-            T is a tensor
+            T is a Variable containing a 4-d tensor of size (n, n, n, channels)
+            adj: Variable containing a tensor of size (n, n)
             '''
             T = T.permute(3, 0, 1, 2)
             return self._collapse6to3(self.tensorprod(T, adj))
 
-        # define the contract function depending on some bool param
-        if (cudaContract):
+        if (cudacontract):
             self.outer_contract = functions.contract18.Contract18Module().cuda()
         else:
             self.outer_contract = python_contract
 
     def _get_chi(self, i, j):
-        # Computes the xi matrix for vertices i and j
-        # xi[a, b] = 1 if (vertex a in i's nbhd == vertex b in j's nbhd) else 0
+        '''
+        i: int representing a vertex
+        j: int representing a vertex
+
+        Computes the xi matrix for vertices i and j:
+            chi[a, b] = 1 if (vertex a in i's nbhd == vertex b in j's nbhd) else 0
+        '''
         def _slice_matrix(i, j):
-            A = self.A_np
-            n = A.shape[0]
-            il = [ii for ii in range(n) if A[i][ii] > 0] # neighbors of i
-            jl = [jj for jj in range(n) if A[j][jj] > 0] # neighbors of j
-            ret = np.identity(n)[il, :] # just take rows corresponding to neighbors of i
-            # take columns correpsonding to neighbors of j. will be 1 if theyre the same, 0 else
-            return ret[:, jl]
+            '''
+            Helper function to compute the chi
+            '''
+            n = self.adj.shape[0]
+            il = [ii for ii in range(n) if self.adj[i, ii] > 0] # neighbors of i
+            jl = [jj for jj in range(n) if self.adj[j, jj] > 0] # neighbors of j
+            chi = np.identity(n)[il, :] # rows corresponding to neighbors of i
+            # columns correpsonding to neighbors of j. will be 1 if theyre the same, 0 else
+            return chi[:, jl]
 
         ret = Variable(torch.from_numpy(_slice_matrix(i, j)).float(), requires_grad=False)
-        return ret.cuda() if self.cudaFlag else ret
+        return ret.cuda() if self.cudaflag else ret
 
     def _get_chi_root(self, i):
-        # receptive field of the "root" is the entirety of the graph
-        # this gives a matrix of size n x (receptive field of vertex i)
-        n = self.A_np.shape[0]
-        il = [ii for ii in range(n) if self.A_np[i][ii] > 0]
+        '''
+        Get the chi matrix correpsonding to
+        i: int
+
+        Returns Variable of a tensor of size n x num_nbrs(i), where n = size of the graph
+        '''
+        n = self.adj.shape[0]
+        il = [ii for ii in range(n) if self.adj[i][ii] > 0]
         chi_np = np.identity(n)[:, il]
         chi_i_root = Variable(torch.from_numpy(chi_np).float(), requires_grad=False)
-        return chi_i_root.cuda() if self.cudaFlag else chi_i_root
+        return chi_i_root.cuda() if self.cudaflag else chi_i_root
 
-    def _register_chis(self, A):
-        n = A.shape[0]
-        # [[self._getChi(i, j) if (A[i][j] > 0 or i == j) else None for j in range(n)] + [self._getChi_root(i)] for i in range(n)]
-        ret = [[self._get_chi(i, j) if A[i][j] > 0 or i == j else None for j in range(n)] + \
-               [self._get_chi_root(i)] for i in range(n)]
-        self.chis = ret
+    def _register_chis(self, adj):
+        '''
+        Store the chi matrices for each pair of vertices for later use.
+        adj: numpy adjacency matrix
+        Returns: list of list of Variables of torch tensors
+        The (i, j) index of this list of lists will be the chi matrix for vertex i and j
+        '''
+        n = adj.shape[0]
+        self.chis = [[self._get_chi(i, j) if adj[i][j] > 0 or i == j else None for j in range(n)] + \
+                     [self._get_chi_root(i)] for i in range(n)]
         return self.chis
 
 
-    def get_F0(self, X, A):
-        # X and A are np ndarrays
-        # X is a feature matrix? of size n x k.
-        # Returns a list of variables
-        self.A_np = A
-        self._register_chis(A)
-        n = len(A) # A is an ndarray?
-        ns = [int(A[i, :].sum()) for i in range(n)] # number of neighbors
+    def get_F0(self, X, adj):
+        '''
+        X: numpy matrix of size n x input_feats
+        adj: numpy array of size n x n
+        Returns a list of Variables(tensors)
+        '''
+        self.adj = adj
+        self._register_chis(adj)
+        n = len(adj)
+        ns = [int(adj[i, :].sum()) for i in range(n)] # number of neighbors
 
-        self.A = Variable(torch.from_numpy(A).float(), requires_grad=False)
-        # F_0 = [ (1 x 1 x k) * (neighbors, neihgbors, 1)]
+        #self.adj = Variable(torch.from_numpy(adj).float(), requires_grad=False)
         F_0 = [Variable(torch.unsqueeze(torch.unsqueeze(torch.from_numpy(X[j]).float(), 0), 0) * \
                  torch.ones(ns[j], ns[j], 1), requires_grad=False) for j in range(n)
               ]
-        if self.cudaFlag:
-            self.A = self.A.cuda()
+        if self.cudaflag:
+            self.adj = self.adj.cuda()
             F_0 = [f.cuda() for f in F_0]
 
         return F_0
 
     def _promote(self, F_prev, i, j):
-        # F_prev is a list of 3-D tensors of size (rows, cols, channels)
-        # chi * F * chi.T
-        # if j == -1, then self.chis[i][-1] =
+        '''
+        Promotes the the previous level's feature vector of vertex j by doing:chi * F * chi.T
+        F_prev: a list of 3-D tensors of size (rows, cols, channels)
+
+        Returns a Variable containing a tensor of size nbrs(i) x nbrs(i) x channels
+        '''
         ret = torch.matmul(self.chis[i][j], torch.matmul(F_prev[j].permute(2, 0, 1), self.chis[i][j].t()))
         # move channel index back to the back
         return ret.permute(1, 2, 0)
 
     def get_nbr_promotions(self, F_prev, i):
         '''
-        Performs all vertex promotions for the vertices in the receptive field of vertex i
-        Must return a tensor
+        Promotes the neighbors of vertex i and stacks them into a tensor
+        F_prev: list of tensors
+        i: int(representing a vertex)
+
+        Returns a Variable containing a tensor of size nbrs(i) x nbrs(i) x nbrs(i) x channels
         '''
-        A = self.A_np
-        n = A.shape[0]
-        stacked = [self._promote(F_prev, i, j) for j in range(n) if A[i, j] > 0]
-        return torch.stack(stacked, 0)
+        n = self.adj.shape[0]
+        all_promotions = [self._promote(F_prev, i, j) for j in range(n) if self.adj[i, j] > 0]
+        stacked = torch.stack(all_promotions, 0)
+        return stacked
 
     def tensorprod(self, T, A):
         d1 = len(T.data.shape)
@@ -157,14 +177,21 @@ class compnetUtils():
         else:
             identity = torch.unsqueeze(identity, 2)
 
-        if self.cudaFlag:
+        if self.cudaflag:
             identity = identity.cuda()
 
         return F * identity
 
 
     def _c6to2_111(self, F):
-        # assumes F has 6 channels and the last index is the channel index
+        '''
+        Performs the case "1+1+1"  contractions. Project F down to 3 of its 5
+        dimensions(excluding channel index).
+
+        F: Variable containing a 6-dim tensor of size n_i x n_i x n_i x n_i x n_i x channels
+        Returns: a list of 5(one for each permutation) of Variables containing a tensor of
+                 size n_i x n_i x channels
+        '''
         def permute_collapse(T, permutation):
             return self.collapse_cube(T.permute(*permutation))
 
@@ -180,6 +207,14 @@ class compnetUtils():
         return ret
 
     def _c6to2_12(self, F):
+        '''
+        Performs the case "1+2"  contractions. Project F along one dimension and contract along
+        two other dimensions.
+
+        F: Variable containing a 6-dim tensor of size n_i x n_i x n_i x n_i x n_i x channels
+        Returns: a list of 5(one for each permutation) of Variables containing a tensor of size
+                 n_i x n_i x channels
+        '''
         def permute_filter_collapse(T, permutation):
             return self.collapse_cube(self.filter_diag_cube(T.permute(*permutation)))
 
@@ -200,6 +235,14 @@ class compnetUtils():
         return ret
 
     def _c6to2_3(self, F):
+        '''
+        Performs the case "3"  contractions. Contract along 3 dimensions.
+
+        F: Variable containing a 6-dim tensor of size n_i x n_i x n_i x n_i x n_i x channels
+        Returns: a list of 5(one for each permutation) of Variables containing a tensor of size
+                 n_i x n_i x channels
+        '''
+
         def permute_filter_collapse_planar(T, permutation):
             return self.collapse_cube(self.filter_diag_cube(T.permute(*permutation),
                                                             planar_diag=False))
@@ -214,36 +257,37 @@ class compnetUtils():
         return ret
 
     def _collapse6to3(self, F):
-        # F is a 6-D tensor of size (channel, n_j, n_j, n_j, n_j, n_j)
-        # output should be a 3d tensor of size (n_j, n_j, channel * num_contractions)
+        '''
+        Performs all 18 contractions of F
+
+        F: Variable containing a 6-dim tensor of size n_i x n_i x n_i x n_i x n_i x channels
+        Returns a Variable containing a tensor of size n_i x n_i x (channels * num_contractions)
+        '''
         assert all(F.data.shape[1] == F.data.shape[i] for i in range(1, F.dim()))
         num_contractions = 18
-        n_j = F.data.shape[1]
+        n_i = F.data.shape[1]
         channels = F.data.shape[0]
 
         F = F.permute(1, 2, 3, 4, 5, 0)
-        channel = F.data.shape[-1]
         F_j = self._c6to2_111(F)
         F_j.extend(self._c6to2_12(F))
         F_j.extend(self._c6to2_3(F))
         F_j = torch.cat(F_j, 2)
-        assert F_j.data.shape == (n_j, n_j, channels * num_contractions)
+        assert F_j.data.shape == (n_i, n_i, channels * num_contractions)
 
         return F_j
 
     def update_F(self, F_prev, W):
         '''
-        F_prev list of tensors
+        Updates the previous level's vertex features.
+
+        F_prev: list of Variables containing tensors of each vertices' feature
         W: linear layer
-        Currently returning a list of tensors
+        Returns a list of Variables of tensors of each vertices' new features
         '''
-        assert len(F_prev) == self.A_np.shape[0]
+        assert len(F_prev) == self.adj.shape[0]
 
         def single_vtx_update(F_prev, i, W):
-            # W can only transform a tensor whose last index is the channel
-            # we need to permute it back and forth
-
-            # promotes vertex i's neighbors
             T_i = self.get_nbr_promotions(F_prev, i)
             collapsed = self.outer_contract(T_i, self.chis[i][i])
             ret = W(collapsed)
@@ -253,25 +297,28 @@ class compnetUtils():
         return F_new
 
     def get_Troot(self, F_prev):
-        A = self.A_np
-        n = A.shape[0]
+        n = self.adj.shape[0]
         return torch.stack([self._promote(F_prev, i, -1) for i in range(n)], 0)
 
-class testerOrder2(nn.Module):
-    def __init__(self, d=2, cudaFlag=True, cudaContract=True):
-        super(testerOrder2, self).__init__()
-        MULT = 1
-        num_contractions = 18
-        c_constraint = num_contractions
+class CCN_2D(nn.Module):
+    def __init__(self, input_feats=2, hidden_size=2, cudaflag=True, cudacontract=True):
+        super(CCN_2D, self).__init__()
+        self.input_feats = input_feats
+        self.hidden_size = 2
+        self.num_contractions = 18
 
-        self.utils = compnetUtils(cudaFlag, cudaContract=cudaContract, num_contractions=num_contractions)
-        self.cudaFlag = cudaFlag
-        self.w1 = nn.Linear(d * num_contractions, d * num_contractions)
-        self.w2 = nn.Linear(d * num_contractions * c_constraint, d * c_constraint**2)
-        self.fc = nn.Linear(d * num_contractions, 1)
+        self.cudaflag = cudaflag
+        self.cudacontract= cudacontract
 
+        self.utils = compnetUtils(cudaflag, cudacontract=cudacontract,
+                                  num_contractions=self.num_contractions)
+        self.w1 = nn.Linear(input_feats * self.num_contractions, hidden_size)
+        self.w2 = nn.Linear(hidden_size * self.num_contractions, input_feats * self.num_contractions)
+        self.fc = nn.Linear(input_feats * self.num_contractions, 1)
 
-    def _change_weight(self, scale=0.01):
+        self._init_weights()
+
+    def _init_weights(self, scale=0.01):
         self.w1.weight.data.normal_(0, scale)
         self.w2.weight.data.normal_(0, scale)
         self.fc.weight.data.normal_(0, scale)
@@ -280,86 +327,81 @@ class testerOrder2(nn.Module):
         self.w2.bias.data.normal_(0, scale)
         self.fc.bias.data.normal_(0, scale * 5)
 
-    def _pass_compnet(self, X, A):
-        F_prev = self.utils.get_F0(X, A)
-        F_prev = self.utils.update_F(F_prev, self.w1)
-        #F_prev = self.utils.update_F(F_prev, self.w2)
-        #F_prev = self.utils.get_Troot(F_prev)
-        return F_prev
-
-    def forward(self, X, A):
-        print("Doing the forward")
-        F_prev = self._pass_compnet(X, A)
-        summed = sum([v.sum(0).sum(0) for v in F_prev])
+    def forward(self, X, adj):
+        '''
+        X: numpy matrix of size n x input_feats
+        adj: numpy matrix of size n x n
+        '''
+        F = self.utils.get_F0(X, adj)
+        F = self.utils.update_F(F, self.w1)
+        F = self.utils.update_F(F, self.w2)
+        summed = sum([v.sum(0).sum(0) for v in F])
         return self.fc(summed)
 
-def is_same(r1, r2, threshold=0.001, quiet=False):
-    d = r1 - r2
-    threshold = max(threshold, threshold * min(abs(r1) - abs(r2)))
-    same = -threshold < d < threshold
-    if not same and not quiet:
-        print('r1 and r2 not equal. Diff: {:.3f}'.format(d))
-    return same
+def perm_matrix(perm):
+    n = len(perm)
+    p_matrix = np.zeros((n, n))
+    for idx, i in enumerate(perm):
+        # index is where i ended up. so pi(i) = index
+        p_matrix[idx, i] = 1
 
-def sum_degrees(A):
-    n = A.shape[0]
-    res = 0
-    max_d = 0
-    for i in range(n):
-        curr = A[i].sum()
-        max_d = max(curr, max_d)
-        res =+ curr**4 / float(n)
-    print('Avg degree: {}, max: {}'.format(res**0.25, max_d))
-    print('Saturation ratio: {}'.format(A.sum().sum() / float(n**2.0)))
+    assert p_matrix.sum() == n
+    assert np.all(p_matrix.sum(axis=1) == np.ones(n))
+    assert np.all(p_matrix.sum(axis=1) == np.ones(n))
+    return p_matrix
 
-def routine(n, d, net, backprop=True):
-    X, A, Y = graphGen(n, d, 0.1, False)
-    sum_degrees(A)
+def permute(X, adj):
+    n = X.shape[0]
+    perm = np.random.permutation(n)
+    p_matrix = perm_matrix(perm)
+    permuted_X = np.matmul(p_matrix, X)
+    permuted_adj = np.matmul(p_matrix, np.matmul(adj, p_matrix.T))
+    #phat = adj[perm][:][:, perm]
+    #xhat = X[perm]
+    return permuted_X, permuted_adj
 
-    if backprop:
-        criterion = nn.MSELoss()
-        optimizer = optim.Adam(net.parameters(), lr=0.01)
+def test_net(samples, input_feats, net):
+    criterion = nn.MSELoss()
+    optimizer = optim.Adam(net.parameters(), lr=0.01)
+
+    X, adj, Y = graph_gen(5, input_feats, 0.1, False)
+    for s in range(samples):
+        print("     Sample {}".format(s))
+        n = random.randint(5, 6)
+        X, adj = permute(X, adj)
+
         optimizer.zero_grad()
-        loss = criterion(net(X, A), Y)
-        loss.backward()
-        optimizer.step()
-    else:
-        return net(X, A)
+        output = net(X, adj)
+        print("Sample {} output: {:.3f}".format(s, output.data[0]))
+        loss = criterion(net(X, adj), Y)
+        #loss.backward()
+        #optimizer.step()
 
+def test_perm_invariance(samples, net, input_feats, atol=1e-6):
+    n = np.random.randint(20, 40)
+    X, adj, Y = graph_gen(n, input_feats, 0.1, False)
 
-def check_first_contract(o, X, A, j=1):
-    F_0 = o.utils.get_F0(X, A)
-    T_j = o.utils.get_Tj(F_0, j)
-    return F_0, o.utils.outer_contract(T_j, o.utils.chis[j][j])
+    outputs = []
+    for s in range(samples):
+        X, adj = permute(X, adj)
+        output = net(X, adj)
+        outputs.append(output.data[0])
 
-def verify(res1, res2, noisy=True):
-    n = res1.data.shape[0]
-    d = res1.data.shape[2]
-    sum_diff = 0.0
-    sum_abs = 0.0
-
-    for a in range(n):
-        for b in range(n):
-            for f in range(d):
-                r1 = res1.data[a, b, f]
-                r2 = res2.data[a, b, f]
-                curr = abs(r1-r2)
-                if cur > 0.01 * abs(r1) and noisy:
-                    print('different at ({}, {}, {}): {} vs {}'.format(a,b,f,r1, r2))
-                sum_dif += cur
-                sum_abs += max(abs(r1), abs(r2))
-    print('Sum of absolute difference:%f, avg :%f. ratio %f %%'.format(summ_dif, summ_dif/(n*n*d), 100 * summ_dif / summ_abs))
-
+    assert np.allclose(outputs, [outputs[0]]*len(outputs), atol=atol)
+    print("Permutation invariance okay!")
 
 if __name__ == '__main__':
     CUDA = False
-    d = 10
+    input_feats = 5
+    hidden_size = 3
+    samples = 2
+
     start = time.time()
     print("Creating the net")
-    net = testerOrder2(d, cudaFlag=CUDA, cudaContract=CUDA)
+    net = CCN_2D(input_feats, cudaflag=CUDA, cudacontract=CUDA)
     print("Done creating the net. Elapsed: {:.2f}".format(time.time() - start))
     if CUDA:
         net.cuda()
     print("Starting routine. Elapsed: {:.2f}".format(time.time() - start))
-    routine(40, d, net)
+    test_net(samples, input_feats, net)
     print("Done")
