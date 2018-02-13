@@ -12,7 +12,7 @@ import torch.nn.functional as Func
 import torch.optim as optim
 import random
 import time
-#import matplotlib.pyplot as pyplot
+
 CUDA = False
 
 def graphGen(N, d, sat_rate=0.9, ones=True, Y_Variable=True):
@@ -117,7 +117,6 @@ class compnetUtils():
         # chi * F * chi.T
         # if j == -1, then self.chis[i][-1] =
         ret = torch.matmul(self.chis[i][j], torch.matmul(F_prev[j].permute(2, 0, 1), self.chis[i][j].t()))
-        print("promoted vertex {}'s neighbor {}".format(i, j))
         # move channel index back to the back
         return ret.permute(1, 2, 0)
 
@@ -234,7 +233,8 @@ class compnetUtils():
 
     def update_F(self, F_prev, W):
         '''
-        F_prev must be a tensor
+        F_prev list of tensors
+        W: linear layer
         Currently returning a list of tensors
         '''
         assert len(F_prev) == self.A_np.shape[0]
@@ -267,28 +267,24 @@ class testerOrder2(nn.Module):
         self.utils = compnetUtils(cudaFlag, cudaContract=cudaContract, num_contractions=num_contractions)
         self.cudaFlag = cudaFlag
         self.w1 = nn.Linear(d * num_contractions, d * num_contractions)
-        #self.w2 = nn.Linear(d * num_contractions * c_constraint, d * c_constraint**2)
+        self.w2 = nn.Linear(d * num_contractions * c_constraint, d * c_constraint**2)
         self.fc = nn.Linear(d * num_contractions, 1)
 
 
     def _change_weight(self, scale=0.01):
         self.w1.weight.data.normal_(0, scale)
-        #self.w2.weight.data.normal_(0, scale)
+        self.w2.weight.data.normal_(0, scale)
         self.fc.weight.data.normal_(0, scale)
 
         self.w1.bias.data.normal_(0, scale)
-        #self.w2.bias.data.normal_(0, scale)
+        self.w2.bias.data.normal_(0, scale)
         self.fc.bias.data.normal_(0, scale * 5)
 
     def _pass_compnet(self, X, A):
-        start = time.time()
-        print("pass_compnet before get_F0")
         F_prev = self.utils.get_F0(X, A)
-        print("pass_compnet before update_F. Elapsed: {:.2f}".format(time.time() - start))
         F_prev = self.utils.update_F(F_prev, self.w1)
-        print("pass_compnet before get_Troot. Elapsed: {:.2f}".format(time.time() - start))
+        #F_prev = self.utils.update_F(F_prev, self.w2)
         #F_prev = self.utils.get_Troot(F_prev)
-        print("pass_compnet done. Elapsed: {:.2f}".format(time.time() - start))
         return F_prev
 
     def forward(self, X, A):
@@ -313,18 +309,14 @@ def sum_degrees(A):
         curr = A[i].sum()
         max_d = max(curr, max_d)
         res =+ curr**4 / float(n)
-    print('avg degree: {}, max: {}'.format(res**0.25, max_d))
+    print('Avg degree: {}, max: {}'.format(res**0.25, max_d))
     print('Saturation ratio: {}'.format(A.sum().sum() / float(n**2.0)))
 
-def routine(n, sat_rate, net=None, backprop=True):
-    d = 1
-    X, A, Y = graphGen(40, d, 0.1, False)
-    print("done gen graph")
+def routine(n, d, net, backprop=True):
+    X, A, Y = graphGen(n, d, 0.1, False)
     sum_degrees(A)
-    print("done sum degrees")
 
     if backprop:
-        net = o2
         criterion = nn.MSELoss()
         optimizer = optim.Adam(net.parameters(), lr=0.01)
         optimizer.zero_grad()
@@ -361,12 +353,13 @@ def verify(res1, res2, noisy=True):
 
 if __name__ == '__main__':
     CUDA = False
-    d = 1
+    d = 10
     start = time.time()
-    print("Creating the net. Time: {}".format(time.time() - start))
-    o2 = testerOrder2(d, cudaFlag=CUDA, cudaContract=CUDA)
+    print("Creating the net")
+    net = testerOrder2(d, cudaFlag=CUDA, cudaContract=CUDA)
     print("Done creating the net. Elapsed: {:.2f}".format(time.time() - start))
-    #o2.cuda()
+    if CUDA:
+        net.cuda()
     print("Starting routine. Elapsed: {:.2f}".format(time.time() - start))
-    routine(5, 0.2, net=o2)
-
+    routine(40, d, net)
+    print("Done")
