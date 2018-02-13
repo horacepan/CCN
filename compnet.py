@@ -117,6 +117,9 @@ class compnetUtils():
         ns = [int(adj[i, :].sum()) for i in range(n)] # number of neighbors
 
         #self.adj = Variable(torch.from_numpy(adj).float(), requires_grad=False)
+        #F_0 = [Variable(torch.unsqueeze(torch.unsqueeze(torch.from_numpy(X[j]).float(), 0), 0) * \
+        #         torch.ones(ns[j], ns[j], 1), requires_grad=False) for j in range(n)
+        #      ]
         F_0 = [Variable(torch.unsqueeze(torch.unsqueeze(torch.from_numpy(X[j]).float(), 0), 0) * \
                  torch.ones(ns[j], ns[j], 1), requires_grad=False) for j in range(n)
               ]
@@ -159,14 +162,19 @@ class compnetUtils():
 
 
     def collapse_cube(self, F):
-        # F is a 6-D tensor, collapse the 2,3,4th axes
-        # assume that the last index is the channel index.
+        '''
+        Collapse the 2/3/4th indices
+
+        F: Variable containing a 6-D tensor. THe last index is the channel index.
+        Returns: a Variable containing a 3-D tensor
+        '''
         d = len(F.data.shape)
+        pdb.set_trace()
         return torch.sum(torch.sum(torch.sum(F, d-4), d-4), d-4)
 
 
     def filter_diag_cube(self, F, planar_diag=True):
-        # F is a 6-D tensor of size n_j, n_j, n_j, n_j, n_j, channel
+        # F: Variable containing a 6-D tensor. THe last index is the channel index.
         assert all(F.data.shape[0] == F.data.shape[i] for i in range(1, 5))
         n = F.data.shape[1]
         identity = Variable(torch.eye(n), requires_grad=False)
@@ -281,7 +289,7 @@ class compnetUtils():
         '''
         Updates the previous level's vertex features.
 
-        F_prev: list of Variables containing tensors of each vertices' feature
+        F_prev: list of Variables containing a tensor of each vertices' feature
         W: linear layer
         Returns a list of Variables of tensors of each vertices' new features
         '''
