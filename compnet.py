@@ -41,6 +41,10 @@ def graph_gen(N, d, sat_rate=0.9, ones=True, Y_Variable=True):
 
 class compnetUtils():
     def __init__(self, cudaflag = True, cudacontract=True, num_contractions=18):
+        '''
+        Wrapper class that contains useful methods for computing various the
+        base feature, feature updates for input graphs
+        '''
         self.cudaflag=cudaflag
         self.cudacontract = cudacontract
 
@@ -140,6 +144,10 @@ class compnetUtils():
         # move channel index back to the back
         return ret.permute(1, 2, 0)
 
+    def _promote_1D(self, F_prev, i, j):
+        ret = torch.matmul(self.chis[i][j], F_prev[j])
+        return ret
+
     def get_nbr_promotions(self, F_prev, i):
         '''
         Promotes the neighbors of vertex i and stacks them into a tensor
@@ -149,7 +157,14 @@ class compnetUtils():
         Returns a Variable containing a tensor of size nbrs(i) x nbrs(i) x nbrs(i) x channels
         '''
         n = self.adj.shape[0]
+        # Promotions of neighbors of vertex i
         all_promotions = [self._promote(F_prev, i, j) for j in range(n) if self.adj[i, j] > 0]
+        stacked = torch.stack(all_promotions, 0)
+        return stacked
+
+    def get_nbr_promotions_1D(self, F_prev, i):
+        n = self.adj.shape[0]
+        all_promotions = [self._promote_1D(F_prev, i, j) for j in range(n) if self.adj[i, j] > 0]
         stacked = torch.stack(all_promotions, 0)
         return stacked
 
@@ -169,7 +184,6 @@ class compnetUtils():
         Returns: a Variable containing a 3-D tensor
         '''
         d = len(F.data.shape)
-        pdb.set_trace()
         return torch.sum(torch.sum(torch.sum(F, d-4), d-4), d-4)
 
 
@@ -268,7 +282,7 @@ class compnetUtils():
         '''
         Performs all 18 contractions of F
 
-        F: Variable containing a 6-dim tensor of size n_i x n_i x n_i x n_i x n_i x channels
+        F: Variable containing a 6-dim tensor of size channels x n_i x n_i x n_i x n_i x n_i
         Returns a Variable containing a tensor of size n_i x n_i x (channels * num_contractions)
         '''
         assert all(F.data.shape[1] == F.data.shape[i] for i in range(1, F.dim()))
@@ -308,21 +322,49 @@ class compnetUtils():
         n = self.adj.shape[0]
         return torch.stack([self._promote(F_prev, i, -1) for i in range(n)], 0)
 
+    def get_F0_1D(self, X, adj):
+        self.adj = adj
+        self._register_chis(adj)
+        n = len(adj)
+        ns = [int(adj[i, :].sum()) for i in range(n)] # number of neighbors
+
+        F_0 = [Variable(torch.unsqueeze(torch.from_numpy(X[j]).float(), 0) * \
+                 torch.ones(ns[j], 1), requires_grad=False) for j in range(n)
+              ]
+
+        if self.cudaflag:
+            self.adj = self.adj.cuda()
+            F_0 = [f.cuda() for f in F_0]
+
+        return F_0
+
+    def update_F_1D(self, F_prev, W):
+        def single_vtx_update(F_prev, i, W):
+            T_i = self.get_nbr_promotions_1D(F_prev, i)
+            row_contract = T_i.sum(0)
+            col_contract = T_i.sum(1)
+            collapsed = torch.cat([row_contract, col_contract], 1)
+            ret = W(collapsed)
+            return Func.relu(ret)
+
+        F_new = [single_vtx_update(F_prev, i, W) for i in range(len(F_prev))]
+        return F_new
+
 class CCN_2D(nn.Module):
     def __init__(self, input_feats=2, hidden_size=2, cudaflag=True, cudacontract=True):
         super(CCN_2D, self).__init__()
         self.input_feats = input_feats
         self.hidden_size = 2
         self.num_contractions = 18
-
+        self.layers = 2
         self.cudaflag = cudaflag
         self.cudacontract= cudacontract
 
         self.utils = compnetUtils(cudaflag, cudacontract=cudacontract,
                                   num_contractions=self.num_contractions)
         self.w1 = nn.Linear(input_feats * self.num_contractions, hidden_size)
-        self.w2 = nn.Linear(hidden_size * self.num_contractions, input_feats * self.num_contractions)
-        self.fc = nn.Linear(input_feats * self.num_contractions, 1)
+        self.w2 = nn.Linear(hidden_size * self.num_contractions, hidden_size)
+        self.fc = nn.Linear(self.layers * hidden_size + input_feats, 1)
 
         self._init_weights()
 
@@ -340,11 +382,46 @@ class CCN_2D(nn.Module):
         X: numpy matrix of size n x input_feats
         adj: numpy matrix of size n x n
         '''
-        F = self.utils.get_F0(X, adj)
-        F = self.utils.update_F(F, self.w1)
-        F = self.utils.update_F(F, self.w2)
-        summed = sum([v.sum(0).sum(0) for v in F])
-        return self.fc(summed)
+        F_0 = self.utils.get_F0(X, adj)
+        F_1 = self.utils.update_F(F_0, self.w1)
+        F_2 = self.utils.update_F(F_1, self.w2)
+
+        summed = [sum([v.sum(0).sum(0) for v in f]) for f in [F_0, F_1, F_2]]
+        graph_feat = torch.cat(summed, 0)
+        return self.fc(graph_feat)
+
+class CCN_1D(nn.Module):
+    def __init__(self, input_feats, hidden_size=2,cudaflag=False, cudacontract=False):
+        super(CCN_1D, self).__init__()
+        self.input_feats = input_feats
+        self.hidden_size=  2
+        self.num_contractions = 2
+        self.layers = 2
+
+        self.utils = compnetUtils(cudaflag, cudacontract, num_contractions=2)
+        self.w1 = nn.Linear(input_feats * self.num_contractions, hidden_size)
+        self.w2 = nn.Linear(hidden_size * self.num_contractions, hidden_size)
+        self.fc = nn.Linear(self.layers * hidden_size + input_feats, 1)
+        self._init_weights()
+
+    def _init_weights(self, scale=0.01):
+        layers = [self.w1, self.w2, self.fc]
+        for l in layers:
+            l.weight.data.normal_(0, scale)
+            l.bias.data.normal_(0, scale)
+
+    def forward(self, X, adj):
+        F_0 = self.utils.get_F0_1D(X, adj)
+        F_1 = self.utils.update_F_1D(F_0, self.w1)
+        F_2 = self.utils.update_F_1D(F_1, self.w2)
+
+        summed = [sum([v.sum(0) for v in f]) for f in [F_0, F_1, F_2]]
+        graph_feat = torch.cat(summed, 0)
+        return self.fc(graph_feat)
+
+        # concat or sum each levels features
+        # concatted = torch.stack([F_0, F_1, F_2], 0)
+        return self.fc(F_2)
 
 def perm_matrix(perm):
     n = len(perm)
@@ -372,20 +449,19 @@ def test_net(samples, input_feats, net):
     criterion = nn.MSELoss()
     optimizer = optim.Adam(net.parameters(), lr=0.01)
 
-    X, adj, Y = graph_gen(5, input_feats, 0.1, False)
     for s in range(samples):
         print("     Sample {}".format(s))
-        n = random.randint(5, 6)
-        X, adj = permute(X, adj)
+        n = random.randint(20, 40)
+        X, adj, Y = graph_gen(n, input_feats, 0.1, False)
 
         optimizer.zero_grad()
         output = net(X, adj)
         print("Sample {} output: {:.3f}".format(s, output.data[0]))
         loss = criterion(net(X, adj), Y)
-        #loss.backward()
-        #optimizer.step()
+        loss.backward()
+        optimizer.step()
 
-def test_perm_invariance(samples, net, input_feats, atol=1e-6):
+def test_perm_invariance(samples, input_feats, net, atol=1e-6):
     n = np.random.randint(20, 40)
     X, adj, Y = graph_gen(n, input_feats, 0.1, False)
 
@@ -402,14 +478,17 @@ if __name__ == '__main__':
     CUDA = False
     input_feats = 5
     hidden_size = 3
-    samples = 2
+    samples = 10
 
     start = time.time()
     print("Creating the net")
-    net = CCN_2D(input_feats, cudaflag=CUDA, cudacontract=CUDA)
+    net_2D = CCN_2D(input_feats, cudaflag=CUDA, cudacontract=CUDA)
+    net_1D = CCN_1D(input_feats, cudaflag=CUDA, cudacontract=CUDA)
     print("Done creating the net. Elapsed: {:.2f}".format(time.time() - start))
     if CUDA:
         net.cuda()
     print("Starting routine. Elapsed: {:.2f}".format(time.time() - start))
-    test_net(samples, input_feats, net)
+    test_net(samples, input_feats, net_1D)
+    print("Sanity check okay")
+    test_perm_invariance(samples, input_feats, net_1D)
     print("Done")
