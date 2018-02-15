@@ -13,8 +13,8 @@ def filter_diag_cube(F, planar_diag=True, cudaflag=False):
     assert all(F.data.shape[0] == F.data.shape[i] for i in range(1, 5))
     n = F.data.shape[1]
     identity = Variable(torch.eye(n), requires_grad=False)
+
     if not planar_diag:
-        # what?
         identity = torch.unsqueeze(identity, 2) * identity
         identity = torch.unsqueeze(identity, 3)
     else:
@@ -32,11 +32,11 @@ def _c6to2_111(F):
         return collapse_cube(T.permute(*permutation))
 
     permutations = [
-        (0, 1, 2, 3, 4, 5), # fix a, b. contract c/d/e
-        (0, 3, 1, 2, 4, 5), # fix a, d. contract b/c/e
-        (1, 2, 0, 3, 4, 5), # fix b, c. contract a/d/e
-        (1, 3, 0, 2, 4, 5), # fix b, d. contract a/c/e
-        (3, 4, 0, 1, 2, 5), # fix d, e. contract a/b/c
+        (0, 1, 2, 3, 4, 5), # fix a, b. sum c/d/e
+        (0, 3, 1, 2, 4, 5), # fix a, d. sum b/c/e
+        (1, 2, 0, 3, 4, 5), # fix b, c. sum a/d/e
+        (1, 3, 0, 2, 4, 5), # fix b, d. sum a/c/e
+        (3, 4, 0, 1, 2, 5), # fix d, e. sum a/b/c
     ]
 
     ret = [permute_collapse(F, p) for p in permutations]
