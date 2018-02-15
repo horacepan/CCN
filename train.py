@@ -10,6 +10,16 @@ import random
 import time
 from models import CCN_1D, CCN_2D
 
+def erdos_reyni_gen(n, d, prob, cuda=False):
+    X = np.random.rand(n, d)
+    adj = (np.random.uniform(size=(n, n)) > prob).astype(int)
+    if cuda:
+        Y = Variable(torch.Tensor([X.sum()])).cuda()
+    else:
+        Y = Variable(torch.Tensor([X.sum()]))
+
+    return X, adj, Y
+
 def graph_gen(N, d, sat_rate=0.9, yvar=True, cuda=False):
     '''
     N: number of nodes
@@ -55,17 +65,18 @@ def train_net(args, net):
 
     for s in range(args.samples):
         n = random.randint(20, 40)
-        X, adj, Y = graph_gen(n, args.input_feats, sat_rate=0.1, cuda=args.cuda)
+        X, adj, Y = erdos_reyni_gen(n, args.input_feats, prob=0.5, cuda=args.cuda)
 
         optimizer.zero_grad()
         output = net(X, adj)
         loss = criterion(net(X, adj), Y)
+        print('iter {}, loss: {:.2f}'.format(s, loss.data[0]))
         loss.backward()
         optimizer.step()
 
 def test_perm_invariance(samples, input_feats, net, atol=1e-6):
     n = np.random.randint(20, 40)
-    X, adj, Y = graph_gen(n, input_feats, sat_rate=0.1)
+    X, adj, Y = erdos_reyni_gen(n, input_feats, prob=0.5)
 
     outputs = []
     for s in range(samples):
@@ -79,27 +90,21 @@ def test_perm_invariance(samples, input_feats, net, atol=1e-6):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument("--cuda", action='store_true', help="cuda flag(if true use CUDA)")
-    parser.add_argument("-i",dest="input_feats", type=int, help="num input features", default=5)
-    parser.add_argument("-hs", dest="hidden_size", type=int, help="size of hidden layer", default=3)
-    parser.add_argument("-s", dest="samples", type=int, help="number of samples to train on", default=10)
-    parser.add_argument("-lr",dest="learning_rate", type=float, help="ADAM learning rate",
-                        default=0.001)
+    parser.add_argument("--input_feats",dest="input_feats", type=int, help="num input features", default=2)
+    parser.add_argument("--hidden", dest="hidden_size", type=int, help="size of hidden layer", default=3)
+    parser.add_argument("--samples", dest="samples", type=int, help="number of samples to train on", default=10)
+    parser.add_argument("--lr",dest="learning_rate", type=float, help="ADAM learning rate",
+                        default=0.005)
+
     args = parser.parse_args()
 
-    net_2D = CCN_2D(args.input_feats, args.hidden_size, cudaflag=args.cuda)
-    net_1D = CCN_1D(args.input_feats, args.hidden_size, cudaflag=args.cuda)
+    net = CCN_1D(args.input_feats, args.hidden_size, cudaflag=args.cuda)
+    #net = CCN_2D(args.input_feats, args.hidden_size, cudaflag=args.cuda)
 
     if args.cuda:
-        net_1D.cuda()
-        net_2D.cuda()
+        net.cuda()
 
     start = time.time()
-    print("Starting test for 1D model. Elapsed: {:.2f}".format(time.time() - start))
-    train_net(args, net_1D)
-    print("Starting test for 2D model. Elapsed: {:.2f}".format(time.time() - start))
-    train_net(args, net_2D)
-
-    print("Sanity check okay")
-    test_perm_invariance(args.samples, args.input_feats, net_1D)
-    test_perm_invariance(args.samples, args.input_feats, net_2D)
-    print("Done")
+    print("Starting training for model {}. Elapsed: {:.2f}".format(net.__class__.__name__, time.time() - start))
+    train_net(args, net)
+    test_perm_invariance(args.samples, args.input_feats, net)
