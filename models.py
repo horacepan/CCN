@@ -15,7 +15,7 @@ class CCN_1D(nn.Module):
         self.num_contractions = 2
         self.layers = 2
 
-        self.utils = compnetUtils(cudaflag, num_contractions=2)
+        self.utils = CompnetUtils(cudaflag)
         self.w1 = nn.Linear(input_feats * self.num_contractions, hidden_size)
         self.w2 = nn.Linear(hidden_size * self.num_contractions, hidden_size)
         self.fc = nn.Linear(self.layers * hidden_size + input_feats, 1)
@@ -36,10 +36,6 @@ class CCN_1D(nn.Module):
         graph_feat = torch.cat(summed, 0)
         return self.fc(graph_feat)
 
-        # concat or sum each levels features
-        # concatted = torch.stack([F_0, F_1, F_2], 0)
-        return self.fc(F_2)
-
 class CCN_2D(nn.Module):
     def __init__(self, input_feats=2, hidden_size=2, cudaflag=True):
         super(CCN_2D, self).__init__()
@@ -49,7 +45,7 @@ class CCN_2D(nn.Module):
         self.layers = 2
         self.cudaflag = cudaflag
 
-        self.utils = compnetUtils(cudaflag, self.num_contractions)
+        self.utils = CompnetUtils(cudaflag, self.num_contractions)
         self.w1 = nn.Linear(input_feats * self.num_contractions, hidden_size)
         self.w2 = nn.Linear(hidden_size * self.num_contractions, hidden_size)
         self.fc = nn.Linear(self.layers * hidden_size + input_feats, 1)
@@ -79,13 +75,13 @@ class CCN_2D(nn.Module):
         return self.fc(graph_feat)
 
 
-class compnetUtils():
-    def __init__(self, cudaflag=False, num_contractions=18):
+class CompnetUtils():
+    def __init__(self, cudaflag=False):
         '''
         Wrapper class that contains useful methods for computing various the
         base feature, feature updates for input graphs
         '''
-        self.cudaflag=cudaflag
+        self.cudaflag = cudaflag
 
         def python_contract(T, adj):
             '''
@@ -132,7 +128,7 @@ class compnetUtils():
 
     def _get_chi_root(self, i):
         '''
-        Get the chi matrix correpsonding to
+        Get the chi matrix between the full graph and vertex i's receptive field.
         i: int
 
         Returns Variable of a tensor of size n x num_nbrs(i), where n = size of the graph
@@ -146,6 +142,7 @@ class compnetUtils():
     def _register_chis(self, adj):
         '''
         Store the chi matrices for each pair of vertices for later use.
+
         adj: numpy adjacency matrix
         Returns: list of list of Variables of torch tensors
         The (i, j) index of this list of lists will be the chi matrix for vertex i and j
@@ -157,6 +154,8 @@ class compnetUtils():
 
     def get_F0(self, X, adj):
         '''
+        Computes the base features for CCN 2D
+
         X: numpy matrix of size n x input_feats
         adj: numpy array of size n x n
         Returns a list of Variables(tensors)
@@ -166,6 +165,10 @@ class compnetUtils():
         n = len(adj)
         ns = [int(adj[i, :].sum()) for i in range(n)] # number of neighbors
 
+        # In the paper, the base features should be of size 1x1xchannels, but
+        # we initialize it to n_j x n_j x channels(where n_j is the size of
+        # the 1-hop neighborhood of vertex j) for simplicity to avoid
+        # two cases for the promotion step.
         F_0 = [Variable(torch.unsqueeze(torch.unsqueeze(torch.from_numpy(X[j]).float(), 0), 0) * \
                  torch.ones(ns[j], ns[j], 1), requires_grad=False) for j in range(n)
               ]
@@ -198,6 +201,11 @@ class compnetUtils():
 
         Returns a Variable containing a tensor of size nbrs(i) x nbrs(i) x channels
         '''
+
+        # In the paper, the receptive field of vertex i would be the union of receptive fields
+        # of its neighbors. But here we just promote according to the vertices
+        # in i's 1-hop neighborhood for simplicity(and to avoid computing this union of
+        # receptive fields.
         ret = torch.matmul(self.chis[i][j], torch.matmul(F_prev[j].permute(2, 0, 1), self.chis[i][j].t()))
         # move channel index back to the back
         return ret.permute(1, 2, 0)
@@ -211,7 +219,7 @@ class compnetUtils():
 
     def get_nbr_promotions(self, F_prev, i):
         '''
-        Promotes the neighbors of vertex i and stacks them into a tensor
+        Promotes the neighbors of vertex i and stacks them into a tensor for CCN 2D
         F_prev: list of tensors
         i: int(representing a vertex)
 
@@ -231,7 +239,8 @@ class compnetUtils():
 
     def update_F(self, F_prev, W):
         '''
-        Updates the previous level's vertex features.
+        Vertex feature update for CCN 2D. This performs the feature update for
+        all vertices.
 
         F_prev: list of Variables containing a tensor of each vertices' feature
         W: linear layer
@@ -250,7 +259,8 @@ class compnetUtils():
 
     def update_F_1D(self, F_prev, W):
         '''
-        Vertex feature update for 1D CCN.
+        Vertex feature update for 1D CCN. This performs the feature update for
+        all vertices.
         '''
 
         def single_vtx_update(F_prev, i, W):

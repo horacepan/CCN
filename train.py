@@ -53,7 +53,7 @@ def train_net(args, net):
         optimizer.zero_grad()
         output = net(X, adj)
         loss = criterion(net(X, adj), Y)
-        print('iter {}, loss: {:.2f}'.format(s, loss.data[0]))
+        print('iter {} / {}, loss: {:.2f}'.format(s, args.samples, loss.data[0]))
         loss.backward()
         optimizer.step()
 
