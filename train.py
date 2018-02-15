@@ -11,6 +11,15 @@ import time
 from models import CCN_1D, CCN_2D
 
 def erdos_reyni_gen(n, d, prob, cuda=False):
+    '''
+    Creates an erdos reyni graph with the given edge probability.
+    Returns a random feature matrix of size (nxd), adjacency matrix, and a
+    a Y variable.
+    n: int, size of graph to return
+    d: int, number of features for the feature matrix
+    prob: float, probability of an edge
+    cuda: boolean flag
+    '''
     X = np.random.rand(n, d)
     adj = (np.random.uniform(size=(n, n)) > prob).astype(int)
     if cuda:
@@ -19,32 +28,6 @@ def erdos_reyni_gen(n, d, prob, cuda=False):
         Y = Variable(torch.Tensor([X.sum()]))
 
     return X, adj, Y
-
-def graph_gen(N, d, sat_rate=0.9, yvar=True, cuda=False):
-    '''
-    N: number of nodes
-    d: length of base feature vector
-
-    '''
-    b = np.random.randint(0,100,size=(N,N))
-    b_symm = b + b.T
-    thres = (2. - np.sqrt((1 - sat_rate) * 2)) if sat_rate > 0.5 else np.sqrt(sat_rate * 2)
-    b_symm = (b_symm <= thres * 100) * 1
-    connected = set([0])
-    still_out = set([i for i in range(1, N)])
-    for i in range(N-1):
-        b_symm[i][i] = 1
-        j = random.sample(still_out, 1)[0]
-        still_out.remove(j)
-        b_symm[i][j] = 1
-        b_symm[j][i] = 1
-    b_symm[N-1][N-1] = 1
-    X = np.random.rand(N, d)
-    if cuda:
-        Y = np.sum(np.sum(b_symm)) if not yvar else Variable(torch.Tensor([float(np.sum(np.sum(b_symm)))])).cuda()
-    else:
-        Y = np.sum(np.sum(b_symm)) if not yvar else Variable(torch.Tensor([float(np.sum(np.sum(b_symm)))]))
-    return X, b_symm, Y
 
 def permute(X, adj):
     n = X.shape[0]
@@ -107,4 +90,5 @@ if __name__ == '__main__':
     start = time.time()
     print("Starting training for model {}. Elapsed: {:.2f}".format(net.__class__.__name__, time.time() - start))
     train_net(args, net)
+    print("Testing permutation invariance")
     test_perm_invariance(args.samples, args.input_feats, net)

@@ -1,7 +1,7 @@
 import pdb
 import numpy as np
 import torch
-import functions.contract18
+#import functions.contract18
 import torch.nn.functional as Func
 from torch.autograd import Variable
 import torch.nn as nn
@@ -96,7 +96,8 @@ class compnetUtils():
             return collapse6to3(self.tensorprod(T, adj))
 
         if cudaflag:
-            self.outer_contract = functions.contract18.Contract18Module().cuda()
+            # self.outer_contract = functions.contract18.Contract18Module().cuda()
+            raise Exception("CUDA not implemented")
         else:
             self.outer_contract = python_contract
 
